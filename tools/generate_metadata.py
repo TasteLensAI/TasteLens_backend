@@ -397,24 +397,6 @@ class MovieLensMetadataGenerator:
         self.window_stats.init_current_window()
         self._rate_limit_lock = threading.Lock()
         
-        # Start worker threads
-        fetch_threads = []
-        process_threads = []
-        
-        # Start fetch workers
-        for i in range(self.fetch_threads):
-            thread = threading.Thread(target=self.fetch_worker, args=(i,))
-            thread.daemon = True
-            thread.start()
-            fetch_threads.append(thread)
-        
-        # Start process workers
-        for i in range(self.process_threads):
-            thread = threading.Thread(target=self.process_worker, args=(i,))
-            thread.daemon = True
-            thread.start()
-            process_threads.append(thread)
-        
         # Progress tracking setup
         metadata_list = []
         total_movies = len(links_df)
@@ -443,31 +425,92 @@ class MovieLensMetadataGenerator:
         progress_thread.daemon = True
         progress_thread.start()
         
-        # Producer: Add all requests to the queue
-        print("📥 Adding movie requests to queue...")
-        for idx, row in links_df.iterrows():
-            request = MovieRequest(
-                movie_id=row['movieId'],
-                tmdb_id=row['tmdbId']
-            )
-            self.request_queue.put(request)
+        # START WORKERS FIRST (before adding requests)
+        fetch_threads = []
+        process_threads = []
         
-        print(f"✅ Added {len(links_df)} requests to queue")
+        # Start fetch workers
+        for i in range(self.fetch_threads):
+            thread = threading.Thread(target=self.fetch_worker, args=(i,))
+            thread.daemon = True
+            thread.start()
+            fetch_threads.append(thread)
         
-        # Consumer: Collect results
+        # Start process workers
+        for i in range(self.process_threads):
+            thread = threading.Thread(target=self.process_worker, args=(i,))
+            thread.daemon = True
+            thread.start()
+            process_threads.append(thread)
+        
+        # THEN run producer and consumer concurrently
+        def producer():
+            """Add requests to queue in separate thread"""
+            print("📥 Adding movie requests to queue...")
+            for idx, row in links_df.iterrows():
+                if self.shutdown_event.is_set():
+                    break
+                request = MovieRequest(
+                    movie_id=row['movieId'],
+                    tmdb_id=row['tmdbId']
+                )
+                self.request_queue.put(request)  # This may block when queue is full
+            print(f"✅ Added {len(links_df)} requests to queue")
+        
+        # Start producer in separate thread so consumer can run concurrently
+        producer_thread = threading.Thread(target=producer)
+        producer_thread.daemon = True
+        producer_thread.start()
+        
+        # Consumer: Collect results (runs concurrently with producer)
         metadata_list = []
         
         try:
-            while not self._is_all_work_complete(len(links_df)):
-                processed_movie = self._get_processed_movie(save_progress_every, metadata_list, start_from)
-                if processed_movie is None:
-                    continue
+            while True:  # Keep running until we explicitly break
+                # First, try to get processed movies
+                processed_movie = self._get_processed_movie()
+                if processed_movie is not None:
+                    metadata_list.append(processed_movie.enhanced_metadata)
                     
-                metadata_list.append(processed_movie.enhanced_metadata)
+                    # Check save progress AFTER adding to list
+                    if self._should_save_progress(save_progress_every, metadata_list):
+                        self._save_progress(metadata_list, self.failed_movies_list, start_from)
+                        print(f"💾 Checkpoint saved at {len(metadata_list)} movies")
+                    continue
+                
+                # If no processed movie available, check if we're really done
+                if self._is_all_work_complete(len(links_df)):
+                    # Double-check: drain any remaining processed movies
+                    remaining_items = self._drain_remaining_processed_items(metadata_list)
+                    if remaining_items > 0:
+                        print(f"🔄 Collected {remaining_items} remaining items from queue")
+                    
+                    break  # Exit the main loop
+                
+                # Brief sleep to avoid busy waiting
+                time.sleep(0.1)
                     
         except KeyboardInterrupt:
             print("\n🛑 Interrupted by user, shutting down...")
             self.shutdown_event.set()
+        
+        # Wait for producer to finish
+        producer_thread.join()
+        
+        # Debug info before cleanup
+        with self.progress_lock:
+            fetch_completed = self.fetch_progress['completed']
+            fetch_failed = self.fetch_progress['failed']
+            process_completed = self.process_progress['completed']
+            process_failed = self.process_progress['failed']
+        
+        print(f"🔍 FINAL DEBUG INFO:")
+        print(f"   Fetch progress: {fetch_completed} successful, {fetch_failed} failed")
+        print(f"   Process progress: {process_completed} successful, {process_failed} failed")
+        print(f"   Metadata list size: {len(metadata_list)}")
+        print(f"   Failed movies list size: {len(self.failed_movies_list)}")
+        print(f"   Processed queue size: {self.processed_queue.qsize()}")
+        print(f"   Result queue size: {self.result_queue.qsize()}")
         
         self._cleanup_workers(fetch_threads, process_threads)
         self._log_and_save_results(metadata_list, start_from)
@@ -475,34 +518,49 @@ class MovieLensMetadataGenerator:
         return metadata_list, self.failed_movies_list
     
     def _is_all_work_complete(self, total_movies):
-        """Check if all work is complete using progress tracking"""
+        """Check if all work is complete using progress tracking and queue states"""
         with self.progress_lock:
             total_fetched = self.fetch_progress['completed'] + self.fetch_progress['failed']
             total_processed = self.process_progress['completed'] + self.process_progress['failed']
         
-        if total_fetched >= total_movies and total_processed >= total_fetched:
+        # Check if queues are empty as well
+        processed_queue_empty = self.processed_queue.empty()
+        result_queue_empty = self.result_queue.empty()
+        
+        if (total_fetched >= total_movies and 
+            total_processed >= total_fetched and 
+            processed_queue_empty and 
+            result_queue_empty):
             print(f"✅ All work completed: Fetched {total_fetched}, Processed {total_processed}")
             return True
         
         if total_fetched >= total_movies and total_processed < total_fetched:
-            print(f"⏳ Waiting for processing to complete: {total_processed}/{total_fetched}")
-            time.sleep(1)
+            print(f"⏳ Waiting for processing: {total_processed}/{total_fetched}, "
+                  f"Queue sizes: processed={self.processed_queue.qsize()}, result={self.result_queue.qsize()}")
         
         return False
     
-    def _get_processed_movie(self, save_progress_every, metadata_list, start_from):
+    def _get_processed_movie(self):
         """Get a processed movie from queue with timeout"""
         try:
             processed_movie = self.processed_queue.get(timeout=2.0)
             self.processed_queue.task_done()
-            
-            # Save progress periodically
-            if self._should_save_progress(save_progress_every, metadata_list):
-                self._save_progress(metadata_list, self.failed_movies_list, start_from)
-            
             return processed_movie
         except queue.Empty:
             return None
+    
+    def _drain_remaining_processed_items(self, metadata_list):
+        """Drain any remaining processed items from the queue"""
+        remaining_items = 0
+        while True:
+            try:
+                processed_movie = self.processed_queue.get_nowait()
+                metadata_list.append(processed_movie.enhanced_metadata)
+                self.processed_queue.task_done()
+                remaining_items += 1
+            except queue.Empty:
+                break
+        return remaining_items
     
     def _should_save_progress(self, save_progress_every, metadata_list):
         """Check if progress should be saved"""
@@ -647,15 +705,6 @@ class MovieLensMetadataGenerator:
 
 def main():
     """Main function with command line argument support"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),  # Console output
-            logging.FileHandler('./logs/metadata_generation.log')  # File output
-        ]
-    )
-    
     parser = argparse.ArgumentParser(description="Generate TMDB metadata for MovieLens movies")
     parser.add_argument("--max-movies", type=int, help="Maximum number of movies to process")
     parser.add_argument("--save-progress-every", type=int, default=10000, help="Period of checkpoints for intermediate results")
@@ -665,8 +714,19 @@ def main():
     parser.add_argument("--output-dir", default="data/processed", help="Output directory")
     parser.add_argument("--fetch-threads", type=int, default=4, help="Number of threads for fetching TMDB data")
     parser.add_argument("--process-threads", type=int, default=4, help="Number of threads for processing data")
+    parser.add_argument("--log-level", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
+                       default='INFO', help="Logging level")
     
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=args.log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # Console output
+            logging.FileHandler('./logs/metadata_generation.log')  # File output
+        ]
+    )
     
     print("🎬 MovieLens TMDB Metadata Generator")
     print("=" * 50)

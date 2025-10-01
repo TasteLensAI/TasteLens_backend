@@ -22,6 +22,34 @@ class BaseDatasetBuilder:
             movieId = Column(Integer, primary_key=True)
             imdbId = Column(String)
             tmdbId = Column(String)
+        
+        class Metadata(self.base):
+            __tablename__ = "metadata"
+            metadataId = Column(Integer, primary_key=True)
+            movieId = Column(Integer)
+            tmdbId = Column(String)
+            title = Column(String)
+            original_title = Column(String)
+            description = Column(String)
+            year = Column(Integer)
+            duration = Column(Integer)
+            tmdbRating = Column(Float)
+            tmdbVoteCount = Column(Integer)
+            poster_path = Column(String)
+
+        class MovieActors(self.base):
+            __tablename__ = "movieactors"
+            movieActorId = Column(Integer, primary_key=True)
+            movieId = Column(Integer)
+            name = Column(String)
+            popularity = Column(Float)
+
+        class MovieDirectors(self.base):
+            __tablename__ = "movieactors"
+            movieDirectorId = Column(Integer, primary_key=True)
+            movieId = Column(Integer)
+            name = Column(String)
+            popularity = Column(Float)
 
         class Users(self.base):
             __tablename__ = "users"
@@ -58,7 +86,10 @@ class BaseDatasetBuilder:
         self._references = {
             "movies": Movies,
             "links": Links,
-            "users": Users
+            "users": Users,
+            "metadata": Metadata,
+            "movieactors": MovieActors,
+            "moviedirectors": MovieDirectors
         }
 
     def create_tables(self):

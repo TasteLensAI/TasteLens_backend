@@ -1,0 +1,2 @@
+class MovieLensInterface:
+    pass

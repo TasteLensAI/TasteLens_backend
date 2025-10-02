@@ -79,7 +79,7 @@ class TMDBMetadataExtractor():
             ),
             "duration": r.get("runtime", None),
             "overview": r.get("overview", ""),
-            "imdbId": r.get("tt0114885", None)
+            "imdbId": r.get("imdb_id", None)
         }
 
         return r, metadata

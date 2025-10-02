@@ -51,7 +51,7 @@ class TMDBMetadataExtractor():
         metadata = {
             "title": r.get("title", ""),
             "original_title": r.get("original_title", ""),
-            "title": r.get("tagline", ""),
+            "tagline": r.get("tagline", ""),
             "coverImage": r.get("poster_path", ""),
             "tmdbRating": r.get("vote_average", None),
             "tmdbVoteCount": r.get("vote_count", None),
@@ -78,7 +78,8 @@ class TMDBMetadataExtractor():
                 if "credits" in r else []
             ),
             "duration": r.get("runtime", None),
-            "overview": r.get("overview", "")
+            "overview": r.get("overview", ""),
+            "imdbId": r.get("tt0114885", None)
         }
 
         return r, metadata

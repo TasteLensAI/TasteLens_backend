@@ -355,6 +355,7 @@ class MovieLensMetadataGenerator:
         return {
             'movieId': result.movie_id,
             'tmdbId': result.tmdb_id,
+            'imdbId': metadata.get("imdbId", ""),
             'title': metadata.get('title', ''),
             'original_title': metadata.get('original_title', ''),
             'tagline': metadata.get('tagline', ''),
@@ -707,7 +708,7 @@ def main():
     """Main function with command line argument support"""
     parser = argparse.ArgumentParser(description="Generate TMDB metadata for MovieLens movies")
     parser.add_argument("--max-movies", type=int, help="Maximum number of movies to process")
-    parser.add_argument("--save-progress-every", type=int, default=10000, help="Period of checkpoints for intermediate results")
+    parser.add_argument("--save-progress-every", type=int, default=1000, help="Period of checkpoints for intermediate results")
     parser.add_argument("--queue_size", type=int, default=1000, help="Queue size")
     parser.add_argument("--start-from", type=int, default=0, help="Start processing from this index")
     parser.add_argument("--data-dir", default="data/ml-latest", help="MovieLens data directory")

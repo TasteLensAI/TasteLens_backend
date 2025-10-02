@@ -211,3 +211,4 @@ data
 database
 *.ipynb
 .vscode
+*.db

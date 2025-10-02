@@ -36,6 +36,7 @@ class BaseDatasetBuilder:
             tmdbId = Column(String)
             title = Column(String)
             original_title = Column(String)
+            genres = Column(String)
             tagline = Column(String)
             description = Column(String)
             year = Column(Integer)
@@ -192,7 +193,7 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
         metadata_df['metadataId'] = range(1, len(metadata_df) + 1)
         
         # Select relevant columns
-        columns = ['metadataId', 'movieId', 'tmdbId', 'title', 'original_title', 'tagline',
+        columns = ['metadataId', 'movieId', 'tmdbId', 'title', 'original_title', 'genres', 'tagline',
                   'description', 'year', 'duration', 'tmdbRating', 'tmdbVoteCount', 'poster_path']
         available_columns = [col for col in columns if col in metadata_df.columns]
         filtered_df = metadata_df[available_columns].fillna('')

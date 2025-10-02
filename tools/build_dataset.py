@@ -12,7 +12,7 @@ def main(args):
     try:
         # Create SQLite agent with your implementation
         source_args = {"name": args.db_name}  # Will create test_tastelens.db
-        agent = SQLiteAgent(source_args=source_args, echo=True)  # echo=True to see SQL statements
+        agent = SQLiteAgent(source_args=source_args, echo=args.echo)
         
         # Use context manager for proper session handling
         with agent as db_agent:
@@ -63,6 +63,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Construct the sqlite database with respect to csv files.")
     parser.add_argument("--db-name", type=str, default="tastelens", help="")
     parser.add_argument("--data-dir", type=str, default="./data", help="")
+    parser.add_argument("--echo", action="store_true")
 
     args = parser.parse_args()
     main(args)

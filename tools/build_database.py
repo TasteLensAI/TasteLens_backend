@@ -4,7 +4,7 @@ import os
 import argparse
 
 # Import your real implementations
-from lib.sql.builders import PandasDatasetBuilder
+from lib.sql.builders import BaseDatabaseReference, PandasDatabaseBuilder
 from lib.sql.agents import SQLiteAgent
 
 # Test database creation using your SQLiteAgent
@@ -21,7 +21,8 @@ def main(args):
             print(f"Session: {db_agent.session}")
             
             # Create database builder with your real agent
-            builder = PandasDatasetBuilder(db_agent, data_dir=args.data_dir)
+            db_ref = BaseDatabaseReference()
+            builder = PandasDatabaseBuilder(db_agent, db_ref, data_dir=args.data_dir)
             
             # Create all tables
             print("Creating tables...")
@@ -30,12 +31,12 @@ def main(args):
             
             # Verify tables exist by querying metadata
             print("\n📋 Created tables:")
-            for table_name in builder.base.metadata.tables.keys():
+            for table_name in db_ref.base.metadata.tables.keys():
                 print(f"  - {table_name}")
             
             # Get table references
-            Movies = builder._references["movies"]
-            Users = builder._references["users"]
+            Movies = db_ref._references["movies"]
+            Users = db_ref._references["users"]
             
             # Query back to verify
             movie_count = db_agent.session.query(Movies).count()

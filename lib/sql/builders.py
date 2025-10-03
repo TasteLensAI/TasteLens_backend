@@ -5,9 +5,8 @@ import pandas as pd
 from pathlib import Path
 import json
 
-class BaseDatasetBuilder:
-    def __init__(self, agent):
-        self.agent = agent
+class BaseDatabaseReference:
+    def __init__(self):
         self.base = declarative_base()
         self._define_tables()
 
@@ -82,7 +81,7 @@ class BaseDatasetBuilder:
             
             # Account status
             # is_active = Column(Boolean, default=True, nullable=False)
-            # is_verified = Column(Boolean, default=False, nullable=False)
+            is_verified = Column(Boolean, default=False, nullable=False)
             # is_admin = Column(Boolean, default=False, nullable=False)
             
             # Timestamps
@@ -103,17 +102,22 @@ class BaseDatasetBuilder:
             "moviedirectors": MovieDirectors
         }
 
+class BaseDatabaseBuilder():
+    def __init__(self, agent, db_ref):
+        self.db_ref = db_ref
+        self.agent = agent
+
     def create_tables(self):
         engine = (
             self.agent._engine if hasattr(self.agent, "_engine") 
             else self.agent.session.get_bind()
         )
         
-        self.base.metadata.create_all(engine)  # checkfirst=True by default
+        self.db_ref.base.metadata.create_all(engine)  # checkfirst=True by default
 
-class PandasDatasetBuilder(BaseDatasetBuilder):
-    def __init__(self, agent, data_dir):
-        super().__init__(agent)
+class PandasDatabaseBuilder(BaseDatabaseBuilder):
+    def __init__(self, agent, db_ref, data_dir):
+        super().__init__(agent, db_ref)
         
         # Set up data paths
         self.data_dir = Path(data_dir)
@@ -173,7 +177,7 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
         for i in range(0, len(movies_df), chunk_size):
             chunk = movies_df.iloc[i:i+chunk_size]
             records = chunk.to_dict('records')
-            self.agent.session.bulk_insert_mappings(self._references['movies'], records)
+            self.agent.session.bulk_insert_mappings(self.db_ref._references['movies'], records)
         
         self.agent.session.commit()
     
@@ -184,7 +188,7 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
         for i in range(0, len(links_df), chunk_size):
             chunk = links_df.iloc[i:i+chunk_size]
             records = chunk.to_dict('records')
-            self.agent.session.bulk_insert_mappings(self._references['links'], records)
+            self.agent.session.bulk_insert_mappings(self.db_ref._references['links'], records)
         
         self.agent.session.commit()
     
@@ -202,7 +206,7 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
         for i in range(0, len(filtered_df), chunk_size):
             chunk = filtered_df.iloc[i:i+chunk_size]
             records = chunk.to_dict('records')
-            self.agent.session.bulk_insert_mappings(self._references['metadata'], records)
+            self.agent.session.bulk_insert_mappings(self.db_ref._references['metadata'], records)
         
         self.agent.session.commit()
     
@@ -233,7 +237,7 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
             chunk_size = 1000
             for i in range(0, len(actor_records), chunk_size):
                 chunk = actor_records[i:i+chunk_size]
-                self.agent.session.bulk_insert_mappings(self._references['movieactors'], chunk)
+                self.agent.session.bulk_insert_mappings(self.db_ref._references['movieactors'], chunk)
             
             self.agent.session.commit()
     
@@ -265,6 +269,6 @@ class PandasDatasetBuilder(BaseDatasetBuilder):
             chunk_size = 1000
             for i in range(0, len(director_records), chunk_size):
                 chunk = director_records[i:i+chunk_size]
-                self.agent.session.bulk_insert_mappings(self._references['moviedirectors'], chunk)
+                self.agent.session.bulk_insert_mappings(self.db_ref._references['moviedirectors'], chunk)
             
             self.agent.session.commit()

@@ -60,6 +60,35 @@ class BaseDatabaseReference:
             name = Column(String)
             popularity = Column(Float)
 
+        class MovieGenres(self.base):
+            __tablename__ = "moviegenres"
+            __table_args__ = {'extend_existing': True}
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            movieId = Column(Integer, index=True)
+            genre = Column(String(100), index=True)
+
+        class Watched(self.base):
+            __tablename__ = "watched"
+            __table_args__ = {'extend_existing': True}
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            userId = Column(Integer, nullable=False, index=True)
+            movieId = Column(Integer, nullable=False, index=True)
+            watched_at = Column(DateTime(timezone=True), server_default=func.now())
+            
+            def __repr__(self):
+                return f"<Watched(userId={self.userId}, movieId={self.movieId}, watched_at={self.watched_at})>"
+
+        class Wishlist(self.base):
+            __tablename__ = "wishlist"
+            __table_args__ = {'extend_existing': True}
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            userId = Column(Integer, nullable=False, index=True)
+            movieId = Column(Integer, nullable=False, index=True)
+            added_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+            
+            def __repr__(self):
+                return f"<Wishlist(userId={self.userId}, movieId={self.movieId})>"
+
         class Users(self.base):
             __tablename__ = "users"
             __table_args__ = {'extend_existing': True}
@@ -99,7 +128,10 @@ class BaseDatabaseReference:
             "users": Users,
             "metadata": Metadata,
             "movieactors": MovieActors,
-            "moviedirectors": MovieDirectors
+            "moviedirectors": MovieDirectors,
+            "moviegenres": MovieGenres,
+            "watched": Watched,
+            "wishlist": Wishlist
         }
 
 class BaseDatabaseBuilder():
@@ -169,6 +201,7 @@ class PandasDatabaseBuilder(BaseDatabaseBuilder):
             self._populate_metadata()
             self._populate_actors()
             self._populate_directors()
+            self._populate_movie_genres()  # Add this
     
     def _populate_movies(self):
         movies_df = self.dataframes['movies'].copy()
@@ -272,3 +305,39 @@ class PandasDatabaseBuilder(BaseDatabaseBuilder):
                 self.agent.session.bulk_insert_mappings(self.db_ref._references['moviedirectors'], chunk)
             
             self.agent.session.commit()
+    
+    def _populate_movie_genres(self):
+        """
+        Create movie_genres table with individual (movieId, genre) pairs.
+        Splits pipe-separated genres into separate rows.
+        """
+        print("Populating movie_genres table...")
+        
+        metadata_df = self.dataframes['metadata']
+        genre_records = []
+        
+        for _, row in metadata_df.iterrows():
+            if pd.isna(row['genres']) or row['genres'] == '':
+                continue
+            
+            # Split pipe-separated genres
+            genres = row['genres'].split('|')
+            
+            for genre in genres:
+                genre_clean = genre.strip().lower()
+                if genre_clean:  # Skip empty strings
+                    genre_records.append({
+                        'movieId': row['movieId'],
+                        'genre': genre_clean
+                    })
+        
+        print(f"Inserting {len(genre_records)} movie-genre pairs...")
+        
+        if genre_records:
+            chunk_size = 1000
+            for i in range(0, len(genre_records), chunk_size):
+                chunk = genre_records[i:i+chunk_size]
+                self.agent.session.bulk_insert_mappings(self.db_ref._references['moviegenres'], chunk)
+            
+            self.agent.session.commit()
+            print(f"Successfully inserted {len(genre_records)} genre records")

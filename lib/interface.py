@@ -100,9 +100,53 @@ class MovieLensInterface:
     def __init__(self, agent):
         self.agent = agent
 
+    def _get_movies_by_ids(self, movie_ids: List[int]) -> List[Movie]:
+        """
+        Helper function to get full movie data by movie IDs using SQLAlchemy ORM
+        
+        Args:
+            movie_ids: List of movie IDs to fetch
+            
+        Returns:
+            List of Movie objects
+        """
+        if not movie_ids:
+            return []
+        
+        dbref = BaseDatabaseReference()
+        Metadata = dbref._references["metadata"]
+        
+        # Use SQLAlchemy query with in_ filter
+        results = self.agent.session.query(Metadata).filter(
+            Metadata.movieId.in_(movie_ids)
+        ).all()
+        
+        # Create a dict for quick lookup
+        movies_dict = {}
+        for row in results:
+            movie = Movie(
+                movieId=row.movieId,
+                tmdbId=row.tmdbId or "",
+                title=row.title or "Unknown Title",
+                original_title=row.original_title or "",
+                genres=row.genres or "",
+                tagline=row.tagline or "",
+                description=row.description or "",
+                year=row.year or 0,
+                duration=row.duration or 0,
+                tmdbRating=row.tmdbRating or 0.0,
+                tmdbVoteCount=row.tmdbVoteCount or 0,
+                poster_path=row.poster_path or ""
+            )
+            movies_dict[row.movieId] = movie
+        
+        # Return movies in the same order as input IDs
+        return [movies_dict[movie_id] for movie_id in movie_ids if movie_id in movies_dict]
+
     def get_movies(self, offset: int = 0, limit: int = 10, search: Optional[str] = None, genres: Optional[List[str]] = None) -> List[Movie]:
         """
         Get movies from the metadata table with pagination and optional filtering
+        Uses SQLAlchemy ORM with weighted scoring to prevent low vote count movies from dominating
         
         Args:
             offset: Number of records to skip
@@ -111,51 +155,63 @@ class MovieLensInterface:
             genres: Optional list of genres (movies must have ALL selected genres)
         
         Returns:
-            List of Movie objects
+            List of Movie objects ordered by weighted score (rating + vote count consideration)
         """
+        dbref = BaseDatabaseReference()
+        Metadata = dbref._references["metadata"]
         
-        query = """
-        SELECT m.movieId, m.tmdbId, m.title, m.original_title, m.genres, m.tagline, m.description, 
-               m.year, m.duration, m.tmdbRating, m.tmdbVoteCount, m.poster_path
-        FROM metadata m
-        WHERE 1=1 AND m.genres IS NOT NULL AND m.genres != ''
-        """
-        params = {}
+        # Start with base query
+        query = self.agent.session.query(Metadata).filter(
+            Metadata.genres.isnot(None),
+            Metadata.genres != ''
+        )
         
+        # Apply search filter
         if search:
-            query += " AND LOWER(m.title) LIKE :search"
-            params['search'] = f"%{search.lower()}%"
+            query = query.filter(
+                func.lower(Metadata.title).like(f"%{search.lower()}%")
+            )
         
+        # Apply genre filters (movies must have ALL selected genres)
         if genres and len(genres) > 0:
-            # For each genre, add a condition that the movie's genres must contain it
-            for i, genre in enumerate(genres):
-                param_name = f"genre_{i}"
-                query += f" AND (LOWER(m.genres) LIKE :{param_name})"
-                params[param_name] = f"%{genre.lower()}%"
+            for genre in genres:
+                query = query.filter(
+                    func.lower(Metadata.genres).like(f"%{genre.lower()}%")
+                )
         
-        query += " ORDER BY m.tmdbRating DESC NULLS LAST, m.title"
-        query += " LIMIT :limit OFFSET :offset"
-        params['limit'] = limit
-        params['offset'] = offset
+        # Order by weighted score: combines rating with vote count consideration
+        # Formula: (tmdbRating * tmdbVoteCount + 6.5 * 100) / (tmdbVoteCount + 100)
+        # This is a Bayesian average with C=100 (confidence threshold) and m=6.5 (average rating)
+        # Movies need ~100 votes to significantly impact their position
+        # Then order by vote count as tiebreaker, then title
+        query = query.order_by(
+            ((Metadata.tmdbRating * Metadata.tmdbVoteCount + 6.5 * 100) / 
+             (Metadata.tmdbVoteCount + 100)).desc(),
+            Metadata.tmdbVoteCount.desc(),
+            Metadata.title
+        )
         
-        result = self.agent.session.execute(text(query), params)
-        rows = result.fetchall()
+        # Apply pagination
+        query = query.limit(limit).offset(offset)
+        
+        # Execute and convert to Movie objects
+        results = query.all()
         
         movies = []
-        for row in rows:
+        for row in results:
             movie = Movie(
-                movieId=row[0],
-                tmdbId=row[1] or "",
-                title=row[2] or "Unknown Title",
-                original_title=row[3] or "",
-                genres=row[4] or "",
-                tagline=row[5] or "",
-                description=row[6] or "",
-                year=row[7] or 0,
-                duration=row[8] or 0,
-                tmdbRating=row[9] or 0.0,
-                tmdbVoteCount=row[10] or 0,
-                poster_path=row[11] or ""
+                movieId=row.movieId,
+                tmdbId=row.tmdbId or "",
+                title=row.title or "Unknown Title",
+                original_title=row.original_title or "",
+                genres=row.genres or "",
+                tagline=row.tagline or "",
+                description=row.description or "",
+                year=row.year or 0,
+                duration=row.duration or 0,
+                tmdbRating=row.tmdbRating or 0.0,
+                tmdbVoteCount=row.tmdbVoteCount or 0,
+                poster_path=row.poster_path or ""
             )
             movies.append(movie)
         
@@ -164,6 +220,7 @@ class MovieLensInterface:
     def count_movies(self, search: Optional[str] = None, genres: Optional[List[str]] = None) -> int:
         """
         Count total movies in the metadata table with optional filtering
+        Uses SQLAlchemy ORM
         
         Args:
             search: Optional search term for title
@@ -172,57 +229,57 @@ class MovieLensInterface:
         Returns:
             Total count of movies matching the criteria
         """
-        query = "SELECT COUNT(*) FROM metadata m WHERE 1=1 AND m.genres IS NOT NULL AND m.genres != ''"
-        params = {}
+        dbref = BaseDatabaseReference()
+        Metadata = dbref._references["metadata"]
         
+        # Start with base query
+        query = self.agent.session.query(Metadata).filter(
+            Metadata.genres.isnot(None),
+            Metadata.genres != ''
+        )
+        
+        # Apply search filter
         if search:
-            query += " AND LOWER(m.title) LIKE :search"
-            params['search'] = f"%{search.lower()}%"
+            query = query.filter(
+                func.lower(Metadata.title).like(f"%{search.lower()}%")
+            )
         
+        # Apply genre filters (movies must have ALL selected genres)
         if genres and len(genres) > 0:
-            # For each genre, add a condition that the movie's genres must contain it
-            for i, genre in enumerate(genres):
-                param_name = f"genre_{i}"
-                query += f" AND (LOWER(m.genres) LIKE :{param_name})"
-                params[param_name] = f"%{genre.lower()}%"
+            for genre in genres:
+                query = query.filter(
+                    func.lower(Metadata.genres).like(f"%{genre.lower()}%")
+                )
         
-        result = self.agent.session.execute(text(query), params)
-        return result.scalar()
+        return query.count()
     
     def get_genre_statistics(self) -> dict:
         """
-        Get statistics for all unique genres with their movie counts
+        Get statistics for all unique genres with their movie counts.
+        Uses the pre-built movie_genres table for fast performance.
         
         Returns:
             Dictionary with genre statistics and total count
         """
-        # First get the total count of all movies
-        total_query = "SELECT COUNT(*) FROM metadata WHERE genres IS NOT NULL AND genres != ''"
+        # Count total unique movies with genres
+        total_query = "SELECT COUNT(DISTINCT movieId) FROM moviegenres"
         total_result = self.agent.session.execute(text(total_query))
         total_movies = total_result.scalar()
         
-        # Get all movies with genres and split them
-        query = "SELECT genres FROM metadata WHERE genres IS NOT NULL AND genres != ''"
-        result = self.agent.session.execute(text(query))
+        # Get genre counts directly from the table
+        stats_query = """
+        SELECT genre, COUNT(*) as count
+        FROM moviegenres
+        GROUP BY genre
+        ORDER BY count DESC
+        """
+        result = self.agent.session.execute(text(stats_query))
         rows = result.fetchall()
         
-        # Count genres
-        genre_counts = {}
-        genres = [
-            [
-                genre.strip().lower() 
-                for genre in row[0].split("|")
-            ] 
-            for row in rows if (row[0] and row[0] != "")
-        ]
-        genres = sum(genres, start=[])
-        genre_counts = dict(Counter(genres))
-        
-        
-        # Convert to list of GenreStats, sorted by count descending
+        # Convert to list of GenreStats
         genre_stats = [
-            GenreStats(genre=genre, count=count)
-            for genre, count in sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)
+            GenreStats(genre=row[0], count=row[1])
+            for row in rows
         ]
         
         return {
@@ -346,3 +403,243 @@ class MovieLensInterface:
         if email:
             return self.get_user_by_email(email) is not None
         return False
+    
+    # Watched Movies Methods
+    def add_to_watched(self, user_id: int, movie_id: int, watched_at: Optional[datetime] = None) -> bool:
+        """
+        Add a movie to user's watched list
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            watched_at: Optional timestamp when movie was watched
+            
+        Returns:
+            True if added successfully, False if already exists
+        """
+        dbref = BaseDatabaseReference()
+        Watched = dbref._references["watched"]
+        
+        # Check if already watched
+        existing = self.agent.session.query(Watched).filter(
+            Watched.userId == user_id,
+            Watched.movieId == movie_id
+        ).first()
+        
+        if existing:
+            return False
+        
+        # Add to watched
+        watched_entry = Watched(
+            userId=user_id,
+            movieId=movie_id,
+            watched_at=watched_at or func.now()
+        )
+        
+        self.agent.session.add(watched_entry)
+        self.agent.session.commit()
+        return True
+    
+    def remove_from_watched(self, user_id: int, movie_id: int) -> bool:
+        """
+        Remove a movie from user's watched list
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            
+        Returns:
+            True if removed, False if not found
+        """
+        dbref = BaseDatabaseReference()
+        Watched = dbref._references["watched"]
+        
+        deleted = self.agent.session.query(Watched).filter(
+            Watched.userId == user_id,
+            Watched.movieId == movie_id
+        ).delete()
+        
+        self.agent.session.commit()
+        return deleted > 0
+    
+    def get_watched_movies(self, user_id: int, limit: int = 50, offset: int = 0) -> List[Movie]:
+        """
+        Get user's watched movies with full movie data
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of results
+            offset: Number of records to skip
+            
+        Returns:
+            List of Movie objects
+        """
+        dbref = BaseDatabaseReference()
+        Watched = dbref._references["watched"]
+        
+        watched = self.agent.session.query(Watched).filter(
+            Watched.userId == user_id
+        ).order_by(Watched.watched_at.desc()).limit(limit).offset(offset).all()
+        
+        # Get movie IDs
+        movie_ids = [w.movieId for w in watched]
+        
+        # Fetch full movie data
+        return self._get_movies_by_ids(movie_ids)
+    
+    def count_watched_movies(self, user_id: int) -> int:
+        """
+        Count total watched movies for a user
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Total count of watched movies
+        """
+        dbref = BaseDatabaseReference()
+        Watched = dbref._references["watched"]
+        
+        count = self.agent.session.query(Watched).filter(
+            Watched.userId == user_id
+        ).count()
+        
+        return count
+    
+    def is_watched(self, user_id: int, movie_id: int) -> bool:
+        """
+        Check if user has watched a movie
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            
+        Returns:
+            True if watched, False otherwise
+        """
+        dbref = BaseDatabaseReference()
+        Watched = dbref._references["watched"]
+        
+        return self.agent.session.query(Watched).filter(
+            Watched.userId == user_id,
+            Watched.movieId == movie_id
+        ).first() is not None
+    
+    # Wishlist Methods
+    def add_to_wishlist(self, user_id: int, movie_id: int) -> bool:
+        """
+        Add a movie to user's wishlist
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            
+        Returns:
+            True if added successfully, False if already exists
+        """
+        dbref = BaseDatabaseReference()
+        Wishlist = dbref._references["wishlist"]
+        
+        # Check if already in wishlist
+        existing = self.agent.session.query(Wishlist).filter(
+            Wishlist.userId == user_id,
+            Wishlist.movieId == movie_id
+        ).first()
+        
+        if existing:
+            return False
+        
+        # Add to wishlist
+        wishlist_entry = Wishlist(
+            userId=user_id,
+            movieId=movie_id
+        )
+        
+        self.agent.session.add(wishlist_entry)
+        self.agent.session.commit()
+        return True
+    
+    def remove_from_wishlist(self, user_id: int, movie_id: int) -> bool:
+        """
+        Remove a movie from user's wishlist
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            
+        Returns:
+            True if removed, False if not found
+        """
+        dbref = BaseDatabaseReference()
+        Wishlist = dbref._references["wishlist"]
+        
+        deleted = self.agent.session.query(Wishlist).filter(
+            Wishlist.userId == user_id,
+            Wishlist.movieId == movie_id
+        ).delete()
+        
+        self.agent.session.commit()
+        return deleted > 0
+    
+    def get_wishlist_movies(self, user_id: int, limit: int = 50, offset: int = 0) -> List[Movie]:
+        """
+        Get user's wishlist movies with full movie data
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of results
+            offset: Number of records to skip
+            
+        Returns:
+            List of Movie objects
+        """
+        dbref = BaseDatabaseReference()
+        Wishlist = dbref._references["wishlist"]
+        
+        wishlist = self.agent.session.query(Wishlist).filter(
+            Wishlist.userId == user_id
+        ).order_by(Wishlist.added_at.desc()).limit(limit).offset(offset).all()
+        
+        # Get movie IDs
+        movie_ids = [w.movieId for w in wishlist]
+        
+        # Fetch full movie data
+        return self._get_movies_by_ids(movie_ids)
+    
+    def count_wishlist_movies(self, user_id: int) -> int:
+        """
+        Count total watched movies for a user
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Total count of watched movies
+        """
+        dbref = BaseDatabaseReference()
+        Wishlist = dbref._references["wishlist"]
+        
+        count = self.agent.session.query(Wishlist).filter(
+            Wishlist.userId == user_id
+        ).count()
+        
+        return count
+    
+    def is_in_wishlist(self, user_id: int, movie_id: int) -> bool:
+        """
+        Check if movie is in user's wishlist
+        
+        Args:
+            user_id: User ID
+            movie_id: Movie ID
+            
+        Returns:
+            True if in wishlist, False otherwise
+        """
+        dbref = BaseDatabaseReference()
+        Wishlist = dbref._references["wishlist"]
+        
+        return self.agent.session.query(Wishlist).filter(
+            Wishlist.userId == user_id,
+            Wishlist.movieId == movie_id
+        ).first() is not None

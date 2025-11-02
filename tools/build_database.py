@@ -5,14 +5,22 @@ import argparse
 
 # Import your real implementations
 from lib.sql.builders import BaseDatabaseReference, PandasDatabaseBuilder
-from lib.sql.agents import SQLiteAgent
+from lib.sql.agents import PostgreSQLAgent
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # Test database creation using your SQLiteAgent
 def main(args):
     try:
         # Create SQLite agent with your implementation
-        source_args = {"name": args.db_name}  # Will create test_tastelens.db
-        agent = SQLiteAgent(source_args=source_args, echo=args.echo)
+        # source_args = {"name": args.db_name}  # Will create test_tastelens.db
+        source_args = {
+            "host": os.getenv("POSTGRES_HOST"),
+            "port": os.getenv("POSTGRES_PORT"),
+            "user": os.getenv("POSTGRES_USER")
+        }
+        agent = PostgreSQLAgent(source_args=source_args, echo=args.echo)
         
         # Use context manager for proper session handling
         with agent as db_agent:
@@ -52,7 +60,7 @@ def main(args):
                 print(f"  - Retrieved movie: '{inserted_movie.title}'")
             
             print("\n🎉 Database creation test completed successfully!")
-            print(f"📁 Database file created: {agent.name}.db")
+            # print(f"📁 Database file created: {agent.name}.db")
         
     except Exception as e:
         print(f"❌ Error: {e}")

@@ -11,12 +11,10 @@ import secrets
 
 from passlib.context import CryptContext
 
-from dotenv import load_dotenv
 from jose import JWTError, jwt
 from fastapi import HTTPException, status
 
 # Security configuration
-load_dotenv()
 SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = os.environ["HASH_ALGORITHM"]
 ACCESS_TOKEN_EXPIRE_MINUTES = 30

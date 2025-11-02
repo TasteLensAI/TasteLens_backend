@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, APIRouter, Query, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -8,12 +10,15 @@ from lib.interface import (
     MoviesResponse, MovieLensInterface, GenresResponse,
     UserCreate, UserLogin, UserResponse, LoginResponse, User, Token
 )
-from lib.sql.agents import SQLiteAgent
+from lib.sql.agents import SQLiteAgent, PostgreSQLAgent
 from lib.auth import (
     get_password_hash, authenticate_user, create_access_token, 
     verify_token, AuthenticationError, UserExistsError,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # Create FastAPI app
 app = FastAPI(
@@ -34,7 +39,16 @@ app.add_middleware(
 router = APIRouter()
 security = HTTPBearer()
 
-DATABASE_NAME = "tastelens"
+# DATABASE_NAME = "tastelens"
+# source_args = {
+#     "name": "tastelens"
+# }
+
+source_args = {
+    "host": os.getenv("POSTGRES_HOST"),
+    "port": os.getenv("POSTGRES_PORT"),
+    "user": os.getenv("POSTGRES_USER")
+}
 
 # Dependency to get current user from token
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
@@ -52,7 +66,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise AuthenticationError()
     
     # Get user from database
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         user = interface.get_user_by_username(username)
         
@@ -84,7 +98,7 @@ async def get_movies(
     # Calculate offset
     offset = (page - 1) * limit
     
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
 
         movies = interface.get_movies(offset=offset, limit=limit, genres=genres, search=search)
@@ -106,7 +120,7 @@ async def get_genres():
     """
     Get all unique genres with their movie counts and total movie count
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         stats = interface.get_genre_statistics()
     
@@ -120,7 +134,7 @@ async def register_user(user_data: UserCreate):
     """
     Register a new user
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Check if user already exists
@@ -158,7 +172,7 @@ async def login_user(login_data: UserLogin):
     """
     Login user and return access token
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Authenticate user
@@ -209,7 +223,7 @@ async def add_to_wishlist(
     """
     Add a movie to user's wishlist
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Add to wishlist
@@ -228,7 +242,7 @@ async def remove_from_wishlist(
     """
     Remove a movie from user's wishlist
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         success = interface.remove_from_wishlist(current_user.id, movieId)
@@ -252,7 +266,7 @@ async def get_wishlist(
     """
     offset = (page - 1) * limit
     
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         movies = interface.get_wishlist_movies(current_user.id, limit=limit, offset=offset)
@@ -276,7 +290,7 @@ async def check_wishlist(
     """
     Check if a movie exists in user's wishlist
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         in_wishlist = interface.is_in_wishlist(current_user.id, movieId)
@@ -294,7 +308,7 @@ async def add_to_watched(
     """
     Mark a movie as watched
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Add to watched list
@@ -313,7 +327,7 @@ async def remove_from_watched(
     """
     Remove a movie from user's watched list
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         success = interface.remove_from_watched(current_user.id, movieId)
@@ -337,7 +351,7 @@ async def get_watched(
     """
     offset = (page - 1) * limit
     
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         movies = interface.get_watched_movies(current_user.id, limit=limit, offset=offset)
@@ -361,7 +375,7 @@ async def check_watched(
     """
     Check if a movie exists in user's watched list
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         is_watched = interface.is_watched(current_user.id, movieId)
@@ -388,7 +402,7 @@ async def get_onboarding_recommendations(
     - Returns random popular movies if user has < 20 total movies (watched + wishlist)
     - Returns personalized recommendations if user has >= 20 movies
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Get user's movie counts
@@ -454,7 +468,7 @@ async def get_personalized_recommendations_endpoint(
     Get personalized movie recommendations based on user's watch history
     Requires at least some watched movies to work
     """
-    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+    with PostgreSQLAgent(source_args=source_args) as agent:
         interface = MovieLensInterface(agent=agent)
         
         # Check if user has enough data

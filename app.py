@@ -378,5 +378,114 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """
     return current_user
 
+@router.get("/recommendations/onboarding")
+async def get_onboarding_recommendations(
+    limit: int = Query(20, ge=1, le=50, description="Number of movies to return"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get recommendations for onboarding users
+    - Returns random popular movies if user has < 20 total movies (watched + wishlist)
+    - Returns personalized recommendations if user has >= 20 movies
+    """
+    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+        interface = MovieLensInterface(agent=agent)
+        
+        # Get user's movie counts
+        counts = interface.get_user_movie_counts(current_user.id)
+        total_movies = counts["total_count"]
+        
+        if total_movies < 20:
+            # Not enough data - return random popular movies
+            movies = interface.get_random_movies_for_user(
+                user_id=current_user.id,
+                limit=limit,
+                min_vote_count=100
+            )
+            
+            return {
+                "movies": movies,
+                "count": len(movies),
+                "type": "random",
+                "message": "Add more movies to your lists to get personalized recommendations",
+                "user_stats": counts
+            }
+        else:
+            # Enough data - return personalized recommendations
+            try:
+                movies = interface.get_personalized_recommendations(
+                    user_id=current_user.id,
+                    limit=limit,
+                    n_clusters=3,
+                    min_vote_count=50
+                )
+                
+                return {
+                    "movies": movies,
+                    "count": len(movies),
+                    "type": "personalized",
+                    "message": "Recommendations based on your taste",
+                    "user_stats": counts
+                }
+            except Exception as e:
+                # Fallback to random if personalization fails
+                movies = interface.get_random_movies_for_user(
+                    user_id=current_user.id,
+                    limit=limit,
+                    min_vote_count=100
+                )
+                
+                return {
+                    "movies": movies,
+                    "count": len(movies),
+                    "type": "random_fallback",
+                    "message": f"Personalization unavailable: {str(e)}",
+                    "user_stats": counts
+                }
+
+@router.get("/recommendations/personalized")
+async def get_personalized_recommendations_endpoint(
+    limit: int = Query(20, ge=1, le=50, description="Number of recommendations"),
+    n_clusters: int = Query(3, ge=1, le=10, description="Number of taste clusters"),
+    min_votes: int = Query(50, ge=0, description="Minimum vote count for quality"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get personalized movie recommendations based on user's watch history
+    Requires at least some watched movies to work
+    """
+    with SQLiteAgent(source_args={"name": DATABASE_NAME}) as agent:
+        interface = MovieLensInterface(agent=agent)
+        
+        # Check if user has enough data
+        counts = interface.get_user_movie_counts(current_user.id)
+        
+        if counts["watched_count"] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No watched movies found. Please add some movies to your watched list first."
+            )
+        
+        try:
+            movies = interface.get_personalized_recommendations(
+                user_id=current_user.id,
+                limit=limit,
+                n_clusters=n_clusters,
+                min_vote_count=min_votes
+            )
+
+            
+            return {
+                "movies": movies,
+                "count": len(movies),
+                "type": "personalized",
+                "user_stats": counts
+            }
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=503,
+                detail="Recommendation system not available. Vector database not found."
+            )
+
 # Include the router in the app
 app.include_router(router)

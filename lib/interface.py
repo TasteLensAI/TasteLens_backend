@@ -1,7 +1,13 @@
+import json
+import faiss
+import numpy as np
+
+from sklearn.cluster import KMeans
 from typing import List, Optional
 from pydantic import BaseModel, field_validator
 from sqlalchemy import text, func
 from datetime import datetime
+from pathlib import Path
 
 from collections import Counter
 
@@ -20,6 +26,23 @@ class Movie(BaseModel):
     tmdbRating: float
     tmdbVoteCount: int
     poster_path: str
+
+    @classmethod
+    def from_db_row(cls, row):
+        return cls(
+            movieId=row.movieId,
+            tmdbId=row.tmdbId or "",
+            title=row.title or "Unknown Title",
+            original_title=row.original_title or "",
+            genres=row.genres or "",
+            tagline=row.tagline or "",
+            description=row.description or "",
+            year=row.year or 0,
+            duration=row.duration or 0,
+            tmdbRating=row.tmdbRating or 0.0,
+            tmdbVoteCount=row.tmdbVoteCount or 0,
+            poster_path=row.poster_path or "" 
+        )
 
 class MoviesResponse(BaseModel):
     movies: List[Movie]
@@ -96,9 +119,153 @@ class LoginResponse(BaseModel):
     user: User
     token: Token
 
+class VectorDBInterface:
+    def __init__(self, path):
+        self.vector_db_path = Path(path)
+        self._vector_index = None
+        self._idx_to_id_mapping = None
+        self._id_to_idx_mapping = None
+        self._load_vector_db()
+    
+    def _load_vector_db(self):
+        if self._vector_index is None:
+            index_path = self.vector_db_path / "movie_vectors.index"
+            if not index_path.exists():
+                raise FileNotFoundError(f"Vector database not found at {index_path}")
+            
+            self._vector_index = faiss.read_index(str(index_path))
+
+            queries_path = self.vector_db_path / "queries.json"
+            with open(queries_path, 'r') as f:
+                queries = json.load(f)
+
+            self._idx_to_id_mapping = {i: int(movie_id) for i, movie_id in enumerate(queries.keys())}
+            self._id_to_idx_mapping = {movid:idx for idx, movid in self._idx_to_id_mapping.items()}
+
+    def _get_clustered_profiling_vectors(self, movie_lists_map, n_clusters = 3, min_movies_per_cluster=5):
+        movie_lists = [item["list"] for item in movie_lists_map]
+        weights = [item["weight"] for item in movie_lists_map]
+
+        all_vectors = []
+        all_weights = []
+        for i, movie_id_list in enumerate(movie_lists):
+            weight = weights[i]
+            
+            # Convert movie IDs to indices, filtering out missing ones
+            indices = [self._id_to_idx_mapping[movie_id] for movie_id in movie_id_list 
+                    if movie_id in self._id_to_idx_mapping]
+            
+            if not indices:
+                continue
+            
+            # Reconstruct vectors for this list
+            # Use reconstruct() for single vector or reconstruct_batch() for multiple
+            indices_array = np.array(indices, dtype=np.int64)
+            vectors = np.vstack([self._vector_index.reconstruct(int(idx)) for idx in indices_array])
+            
+            # Average vectors in this list and apply weight
+            all_vectors.append(vectors)
+            all_weights.extend([weight] * len(vectors))
+        
+        if not all_vectors:
+            return None
+
+        combined_vectors = np.vstack(all_vectors)
+        all_weights = np.array(all_weights)
+
+        if len(combined_vectors) < min_movies_per_cluster:
+            # Fall back to simple average if not enough movies
+            weighted_avg = np.average(combined_vectors, axis=0, weights=all_weights, keepdims=True)
+            weighted_avg = weighted_avg.astype('float32')
+            faiss.normalize_L2(weighted_avg)
+            return [(weighted_avg, 1.0)]
+        
+        max_clusters = min(n_clusters, len(combined_vectors) // min_movies_per_cluster)
+        max_clusters = max(2, max_clusters)  # At least 2 clusters
+
+        kmeans = KMeans(n_clusters=max_clusters, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(combined_vectors)
+
+        profile_vectors = []
+        for cluster_id in range(max_clusters):
+            # Get vectors belonging to this cluster
+            cluster_mask = cluster_labels == cluster_id
+            cluster_vectors = combined_vectors[cluster_mask]
+            cluster_weights = all_weights[cluster_mask]
+            
+            if len(cluster_vectors) == 0:
+                continue
+            
+            # Weighted average within cluster
+            cluster_profile = np.average(cluster_vectors, axis=0, weights=cluster_weights, keepdims=True)
+            cluster_profile = cluster_profile.astype('float32')
+            faiss.normalize_L2(cluster_profile)
+
+            # Weight is proportional to cluster size (bigger clusters = more important)
+            cluster_weight = len(cluster_vectors) / len(combined_vectors)
+
+            profile_vectors.append((cluster_profile, cluster_weight))
+        
+        return profile_vectors if profile_vectors else None
+    
+    def get_recommendations(
+        self,
+        watched_ids,
+        wishlist_ids=None,
+        k=20,
+        n_clusters=3,
+        watched_weight=1.0,
+        wishlist_weight=0.4
+    ):
+        movie_lists_map = [
+            {"list": watched_ids, "weight": watched_weight}
+        ]
+        
+        if wishlist_ids:
+            movie_lists_map.append(
+                {"list": wishlist_ids, "weight": wishlist_weight}
+            )
+
+        # Get clustered profile vectors
+        profile_vectors = self._get_clustered_profiling_vectors(
+            movie_lists_map, 
+            n_clusters=n_clusters
+        )
+
+        if profile_vectors is None:
+            return []
+        
+        exclude_ids = set(watched_ids)
+        if wishlist_ids:
+            exclude_ids.update(wishlist_ids)
+
+        all_recommendations = []
+        for cluster_id, (profile_vector, cluster_weight) in enumerate(profile_vectors):
+            cluster_k = int(k * cluster_weight)
+            search_k = cluster_k * 3
+            
+            distances, indices = self._vector_index.search(profile_vector, search_k)
+            
+            cluster_recs = []
+            for idx, dist in zip(indices[0], distances[0]):
+                movie_id = self._idx_to_id_mapping[idx]
+                if movie_id not in exclude_ids:
+                    cluster_recs.append((movie_id, float(dist), cluster_id))
+                    exclude_ids.add(movie_id)
+
+            all_recommendations.extend(cluster_recs)
+        
+        all_recommendations.sort(key=lambda x: x[1])
+        return all_recommendations[:k]
+
 class MovieLensInterface:
     def __init__(self, agent):
         self.agent = agent
+        self.vector_db = None
+
+    def _init_vector_db(self):
+        if self.vector_db == None:
+            self.vector_db = VectorDBInterface(path = "C:/personalprojects/TasteLens/TasteLens_backend/data/vector-db")
 
     def _get_movies_by_ids(self, movie_ids: List[int]) -> List[Movie]:
         """
@@ -198,24 +365,7 @@ class MovieLensInterface:
         results = query.all()
         
         movies = []
-        for row in results:
-            movie = Movie(
-                movieId=row.movieId,
-                tmdbId=row.tmdbId or "",
-                title=row.title or "Unknown Title",
-                original_title=row.original_title or "",
-                genres=row.genres or "",
-                tagline=row.tagline or "",
-                description=row.description or "",
-                year=row.year or 0,
-                duration=row.duration or 0,
-                tmdbRating=row.tmdbRating or 0.0,
-                tmdbVoteCount=row.tmdbVoteCount or 0,
-                poster_path=row.poster_path or ""
-            )
-            movies.append(movie)
-        
-        return movies
+        return [Movie.from_db_row(row) for row in results]
 
     def count_movies(self, search: Optional[str] = None, genres: Optional[List[str]] = None) -> int:
         """
@@ -643,3 +793,281 @@ class MovieLensInterface:
             Wishlist.userId == user_id,
             Wishlist.movieId == movie_id
         ).first() is not None
+
+    # Recommendation Methods
+    def get_random_movies_for_user(
+        self, 
+        user_id: int, 
+        limit: int = 20,
+        min_vote_count: int = 100,
+        min_rating: float = 6.5
+    ) -> List[Movie]:
+        """
+        Get random popular movies that are NOT in user's watched or wishlist
+        Useful for user onboarding and discovery
+        
+        Args:
+            user_id: User ID to exclude their movies
+            limit: Number of random movies to return
+            min_vote_count: Minimum vote count to ensure quality movies
+            min_rating: Minimum TMDB rating (default 6.5)
+            
+        Returns:
+            List of Movie objects
+        """
+        self._init_vector_db()
+
+        dbref = BaseDatabaseReference()
+        Metadata = dbref._references["metadata"]
+        Watched = dbref._references["watched"]
+        Wishlist = dbref._references["wishlist"]
+
+        watched_subquery = self.agent.session.query(Watched.movieId).filter(
+            Watched.userId == user_id
+        )
+
+        wishlist_subquery = self.agent.session.query(Wishlist.movieId).filter(
+            Wishlist.userId == user_id
+        )
+
+        query = self.agent.session.query(Metadata).filter(
+            Metadata.genres.isnot(None),
+            Metadata.genres != '',
+            Metadata.tmdbVoteCount >= min_vote_count,
+            Metadata.tmdbRating >= min_rating,
+            ~Metadata.movieId.in_(watched_subquery),
+            ~Metadata.movieId.in_(wishlist_subquery)
+        ).order_by(func.random()).limit(limit)
+
+        return [Movie.from_db_row(row) for row in query.all()]
+
+    def get_user_movie_counts(self, user_id: int) -> dict:
+        """
+        Get counts of movies in user's watched and wishlist
+        Useful for determining if user needs onboarding
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dictionary with watched_count and wishlist_count
+        """
+        watched_count = self.count_watched_movies(user_id)
+        wishlist_count = self.count_wishlist_movies(user_id)
+
+        return {
+            "watched_count": watched_count,
+            "wishlist_count": wishlist_count,
+            "total_count": watched_count + wishlist_count,
+        }
+
+    def get_personalized_recommendations(
+        self,
+        user_id: int,
+        limit: int = 20,
+        n_clusters: int = 3,
+        watched_weight: float = 1.0,
+        wishlist_weight: float = 0.4,
+        min_vote_count: int = 50
+    ) -> List[Movie]:
+        """
+        Get personalized movie recommendations using vector similarity
+        Uses clustering to capture different aspects of user's taste
+        
+        Args:
+            user_id: User ID
+            limit: Number of recommendations to return
+            n_clusters: Number of taste clusters to create
+            watched_weight: Weight for watched movies (default 1.0)
+            wishlist_weight: Weight for wishlist movies (default 0.4)
+            min_vote_count: Minimum vote count for quality filtering
+            
+        Returns:
+            List of recommended Movie objects
+        """
+        self._init_vector_db()
+
+        # Get user's watched and wishlist movies
+        watched_movies = self.get_watched_movies(user_id, limit=200)
+        wishlist_movies = self.get_wishlist_movies(user_id, limit=100)
+
+        num_movies = len(watched_movies) + len(wishlist_movies)
+        if num_movies < 5:
+            # User has no data, return random popular movies
+            return self.get_random_movies_for_user(user_id, limit, min_vote_count)
+        
+        # Extract movie IDs
+        watched_ids = [m.movieId for m in watched_movies]
+        wishlist_ids = [m.movieId for m in wishlist_movies] if wishlist_movies else None
+        
+        # Get recommendations from vector database
+        recommendations = self.vector_db.get_recommendations(
+            watched_ids=watched_ids,
+            wishlist_ids=wishlist_ids,
+            k=limit * 2,  # Get more for filtering
+            n_clusters=n_clusters,
+            watched_weight=watched_weight,
+            wishlist_weight=wishlist_weight
+        )
+        
+        if not recommendations:
+            raise
+        
+        # Extract movie IDs from recommendations (ignore distance and cluster_id)
+        recommended_movie_ids = [movie_id for movie_id, _, _ in recommendations]
+        
+        # Get full movie data
+        movies = self._get_movies_by_ids(recommended_movie_ids)
+        
+        # Filter by vote count for quality
+        filtered_movies = [m for m in movies if m.tmdbVoteCount >= min_vote_count]
+        
+        # Return requested limit
+        return filtered_movies[:limit]
+    
+    def get_similar_movies(
+        self,
+        movie_id: int,
+        limit: int = 10,
+        user_id: Optional[int] = None,
+        min_vote_count: int = 50
+    ) -> List[Movie]:
+        """
+        Get movies similar to a specific movie using vector similarity
+        
+        Args:
+            movie_id: Movie ID to find similar movies for
+            limit: Number of similar movies to return
+            user_id: Optional user ID to exclude their watched/wishlist
+            min_vote_count: Minimum vote count for quality filtering
+            
+        Returns:
+            List of similar Movie objects
+        """
+        self._init_vector_db()
+
+        try:
+            # Get exclusion lists if user_id provided
+            exclude_ids = set()
+            if user_id:
+                watched = self.get_watched_movies(user_id, limit=1000)
+                exclude_ids.update(m.movieId for m in watched)
+                wishlist = self.get_wishlist_movies(user_id, limit=1000)
+                exclude_ids.update(m.movieId for m in wishlist)
+            
+            # Add the source movie to exclusions
+            exclude_ids.add(movie_id)
+            
+            # Create a simple recommendation based on single movie
+            recommendations = self.vector_db.get_recommendations(
+                watched_ids=[movie_id],
+                wishlist_ids=None,
+                k=limit * 2,  # Get more for filtering
+                n_clusters=1,  # No clustering for single movie
+                watched_weight=1.0,
+                wishlist_weight=0.0
+            )
+            
+            if not recommendations:
+                return []
+            
+            # Filter out excluded movies
+            filtered_recs = [(mid, dist, cid) for mid, dist, cid in recommendations 
+                           if mid not in exclude_ids]
+            
+            # Get movie IDs
+            recommended_movie_ids = [movie_id for movie_id, _, _ in filtered_recs]
+            
+            # Get full movie data
+            movies = self._get_movies_by_ids(recommended_movie_ids)
+            
+            # Filter by vote count
+            filtered_movies = [m for m in movies if m.tmdbVoteCount >= min_vote_count]
+            
+            return filtered_movies[:limit]
+            
+        except Exception as e:
+            print(f"Error getting similar movies: {e}")
+            return []
+    
+    def get_recommendation_insights(
+        self,
+        user_id: int,
+        n_clusters: int = 3
+    ) -> dict:
+        """
+        Get insights about user's taste clusters
+        Useful for explaining recommendations or showing taste profiles
+        
+        Args:
+            user_id: User ID
+            n_clusters: Number of taste clusters to analyze
+            
+        Returns:
+            Dictionary with cluster information and movie samples
+        """
+        self._init_vector_db()
+
+        # Get user's movies
+        watched_movies = self.get_watched_movies(user_id, limit=200)
+        wishlist_movies = self.get_wishlist_movies(user_id, limit=100)
+        
+        if not watched_movies:
+            return {
+                "error": "User has no watched movies",
+                "total_movies": 0
+            }
+        
+        watched_ids = [m.movieId for m in watched_movies]
+        wishlist_ids = [m.movieId for m in wishlist_movies] if wishlist_movies else []
+        
+        try:
+            # Build movie lists map
+            movie_lists_map = [{"list": watched_ids, "weight": 1.0}]
+            if wishlist_ids:
+                movie_lists_map.append({"list": wishlist_ids, "weight": 0.4})
+            
+            # Get clustered profile vectors
+            profile_vectors = self.vector_db._get_clustered_profiling_vectors(
+                movie_lists_map,
+                n_clusters=n_clusters
+            )
+            
+            if not profile_vectors:
+                return {
+                    "error": "Could not create taste clusters",
+                    "total_movies": len(watched_ids) + len(wishlist_ids)
+                }
+            
+            # Get sample recommendations from each cluster
+            clusters = []
+            for cluster_id, (profile_vector, cluster_weight) in enumerate(profile_vectors):
+                # Get top 5 recommendations from this cluster
+                distances, indices = self.vector_db._vector_index.search(profile_vector, 5)
+                
+                sample_movie_ids = [
+                    self.vector_db._idx_to_id_mapping[idx] 
+                    for idx in indices[0]
+                ]
+                
+                sample_movies = self._get_movies_by_ids(sample_movie_ids)
+                
+                clusters.append({
+                    "cluster_id": cluster_id,
+                    "weight": round(cluster_weight * 100, 1),  # As percentage
+                    "sample_movies": sample_movies
+                })
+            
+            return {
+                "total_movies": len(watched_ids) + len(wishlist_ids),
+                "watched_count": len(watched_ids),
+                "wishlist_count": len(wishlist_ids),
+                "n_clusters": len(profile_vectors),
+                "clusters": clusters
+            }
+            
+        except Exception as e:
+            return {
+                "error": f"Failed to analyze taste clusters: {str(e)}",
+                "total_movies": len(watched_ids) + len(wishlist_ids)
+            }

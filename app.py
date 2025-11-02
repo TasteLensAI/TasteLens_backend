@@ -1,5 +1,8 @@
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, APIRouter, Query, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -16,9 +19,6 @@ from lib.auth import (
     verify_token, AuthenticationError, UserExistsError,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # Create FastAPI app
 app = FastAPI(

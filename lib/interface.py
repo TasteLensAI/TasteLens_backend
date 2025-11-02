@@ -407,29 +407,34 @@ class MovieLensInterface:
         """
         Get statistics for all unique genres with their movie counts.
         Uses the pre-built movie_genres table for fast performance.
+        Uses SQLAlchemy ORM for type safety and database portability.
         
         Returns:
             Dictionary with genre statistics and total count
         """
-        # Count total unique movies with genres
-        total_query = "SELECT COUNT(DISTINCT movieId) FROM moviegenres"
-        total_result = self.agent.session.execute(text(total_query))
-        total_movies = total_result.scalar()
+        dbref = BaseDatabaseReference()
+        MovieGenres = dbref._references["moviegenres"]
         
-        # Get genre counts directly from the table
-        stats_query = """
-        SELECT genre, COUNT(*) as count
-        FROM moviegenres
-        GROUP BY genre
-        ORDER BY count DESC
-        """
-        result = self.agent.session.execute(text(stats_query))
-        rows = result.fetchall()
+        # Count total unique movies with genres using SQLAlchemy
+        total_movies = self.agent.session.query(
+            func.count(func.distinct(MovieGenres.movieId))
+        ).scalar()
+        
+        # Get genre counts directly from the table using SQLAlchemy
+        # Query returns tuples of (genre, count) ordered by count descending
+        genre_counts = self.agent.session.query(
+            MovieGenres.genre,
+            func.count(MovieGenres.genre).label('count')
+        ).group_by(
+            MovieGenres.genre
+        ).order_by(
+            func.count(MovieGenres.genre).desc()
+        ).all()
         
         # Convert to list of GenreStats
         genre_stats = [
-            GenreStats(genre=row[0], count=row[1])
-            for row in rows
+            GenreStats(genre=row.genre, count=row.count)
+            for row in genre_counts
         ]
         
         return {

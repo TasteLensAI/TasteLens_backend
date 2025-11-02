@@ -486,6 +486,12 @@ async def get_personalized_recommendations_endpoint(
                 status_code=503,
                 detail="Recommendation system not available. Vector database not found."
             )
+        
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail="Error: " + str(e)
+            )
 
 # Include the router in the app
 app.include_router(router)

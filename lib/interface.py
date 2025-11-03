@@ -1,3 +1,4 @@
+import os
 import json
 import faiss
 import numpy as np
@@ -265,7 +266,12 @@ class MovieLensInterface:
 
     def _init_vector_db(self):
         if self.vector_db == None:
-            self.vector_db = VectorDBInterface(path = "C:/personalprojects/TasteLens/TasteLens_backend/data/vector-db")
+            # Get vector DB path from environment or use default
+            vector_db_path = os.getenv(
+                "VECTOR_DB_PATH",
+                os.path.join(os.path.dirname(__file__), "..", "data", "vector-db")
+            )
+            self.vector_db = VectorDBInterface(path=vector_db_path)
 
     def _get_movies_by_ids(self, movie_ids: List[int]) -> List[Movie]:
         """

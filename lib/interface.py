@@ -121,8 +121,16 @@ class LoginResponse(BaseModel):
     token: Token
 
 class VectorDBInterface:
-    def __init__(self, path):
+    def __init__(self, path, use_quantized=True):
+        """
+        Initialize Vector Database Interface
+        
+        Args:
+            path: Path to vector database directory
+            use_quantized: If True, use quantized index (smaller memory footprint)
+        """
         self.vector_db_path = Path(path)
+        self.use_quantized = use_quantized
         self._vector_index = None
         self._idx_to_id_mapping = None
         self._id_to_idx_mapping = None
@@ -130,18 +138,51 @@ class VectorDBInterface:
     
     def _load_vector_db(self):
         if self._vector_index is None:
-            index_path = self.vector_db_path / "movie_vectors.index"
-            if not index_path.exists():
-                raise FileNotFoundError(f"Vector database not found at {index_path}")
+            # Try to load quantized index first if requested
+            if self.use_quantized:
+                quantized_path = self.vector_db_path / "movie_vectors_quantized.index"
+                if quantized_path.exists():
+                    print(f"Loading quantized vector database from {quantized_path}")
+                    self._vector_index = faiss.read_index(str(quantized_path))
+                    # Set search parameters for better accuracy with quantized index
+                    self._vector_index.nprobe = 10  # Number of clusters to search
+                else:
+                    print(f"Quantized index not found at {quantized_path}, falling back to normal index")
+                    self.use_quantized = False
             
-            self._vector_index = faiss.read_index(str(index_path))
+            # Fall back to normal index if quantized not found or not requested
+            if not self.use_quantized:
+                index_path = self.vector_db_path / "movie_vectors.index"
+                if not index_path.exists():
+                    raise FileNotFoundError(f"Vector database not found at {index_path}")
+                
+                print(f"Loading normal vector database from {index_path}")
+                self._vector_index = faiss.read_index(str(index_path))
 
-            queries_path = self.vector_db_path / "queries.json"
-            with open(queries_path, 'r') as f:
-                queries = json.load(f)
+            # Load ID mappings from separate files (lighter than queries.json)
+            idx_to_id_path = self.vector_db_path / "idx_to_id_mapping.json"
+            id_to_idx_path = self.vector_db_path / "id_to_idx_mapping.json"
+            
+            if idx_to_id_path.exists() and id_to_idx_path.exists():
+                # Use pre-computed mapping files
+                with open(idx_to_id_path, 'r') as f:
+                    # Keys are strings in JSON, convert to int
+                    self._idx_to_id_mapping = {int(k): v for k, v in json.load(f).items()}
+                
+                with open(id_to_idx_path, 'r') as f:
+                    # Values need to be int, keys are already int movie IDs
+                    self._id_to_idx_mapping = {int(k): v for k, v in json.load(f).items()}
+                
+                print(f"Loaded ID mappings for {len(self._idx_to_id_mapping)} movies")
+            else:
+                # Fallback to queries.json if mapping files don't exist
+                print("ID mapping files not found, loading from queries.json (legacy)")
+                queries_path = self.vector_db_path / "queries.json"
+                with open(queries_path, 'r') as f:
+                    queries = json.load(f)
 
-            self._idx_to_id_mapping = {i: int(movie_id) for i, movie_id in enumerate(queries.keys())}
-            self._id_to_idx_mapping = {movid:idx for idx, movid in self._idx_to_id_mapping.items()}
+                self._idx_to_id_mapping = {i: int(movie_id) for i, movie_id in enumerate(queries.keys())}
+                self._id_to_idx_mapping = {movid:idx for idx, movid in self._idx_to_id_mapping.items()}
 
     def _get_clustered_profiling_vectors(self, movie_lists_map, n_clusters = 3, min_movies_per_cluster=5):
         movie_lists = [item["list"] for item in movie_lists_map]
@@ -271,7 +312,9 @@ class MovieLensInterface:
                 "VECTOR_DB_PATH",
                 os.path.join(os.path.dirname(__file__), "..", "data", "vector-db")
             )
-            self.vector_db = VectorDBInterface(path=vector_db_path)
+            # Use quantized index by default (set to False to use normal index)
+            use_quantized = os.getenv("USE_QUANTIZED_INDEX", "true").lower() == "true"
+            self.vector_db = VectorDBInterface(path=vector_db_path, use_quantized=use_quantized)
 
     def _get_movies_by_ids(self, movie_ids: List[int]) -> List[Movie]:
         """

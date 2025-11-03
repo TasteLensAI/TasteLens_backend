@@ -161,11 +161,57 @@ def init_vector_db(movie_embeddings):
 
     return index
 
-def save_vector_db(vector_db, output_dir):
-    faiss.write_index(vector_db, str(output_dir / "movie_vectors.index"))
+def init_quantized_vector_db(movie_embeddings, nlist=100, m=16, nbits=8):
+    """
+    Create a quantized FAISS index for smaller memory footprint
+    
+    Args:
+        movie_embeddings: numpy array of embeddings
+        nlist: number of clusters for IVF (more = better accuracy, more memory)
+        m: number of subquantizers for PQ (must divide dimension)
+        nbits: number of bits per subquantizer (8 is standard)
+    
+    Returns:
+        Quantized FAISS index
+    """
+    d = movie_embeddings.shape[1]
+    
+    # Create IVF-PQ index (Inverted File with Product Quantization)
+    quantizer = faiss.IndexFlatL2(d)
+    index = faiss.IndexIVFPQ(quantizer, d, nlist, m, nbits)
+    
+    # Enable direct map to support reconstruct() method
+    # This allows retrieving vectors by ID, needed for clustering
+    index.make_direct_map()
+    
+    # Train the index (required for IVF-PQ)
+    print(f"Training quantized index with {movie_embeddings.shape[0]} vectors...")
+    index.train(movie_embeddings.astype('float32'))
+    
+    # Add vectors
+    index.add(movie_embeddings.astype('float32'))
+    
+    return index
 
-    print(f"Saved vector database to {output_dir}")
+def save_vector_db(vector_db, output_dir):
+    # Save normal index
+    normal_path = output_dir / "movie_vectors.index"
+    faiss.write_index(vector_db, str(normal_path))
+    
+    normal_size = normal_path.stat().st_size / 1024 / 1024  # MB
+    print(f"Saved normal vector database to {normal_path}")
+    print(f"Normal index size: {normal_size:.2f} MB")
     print(f"Total movies: {vector_db.ntotal}")
+
+def save_quantized_vector_db(quantized_db, output_dir):
+    # Save quantized index
+    quantized_path = output_dir / "movie_vectors_quantized.index"
+    faiss.write_index(quantized_db, str(quantized_path))
+    
+    quantized_size = quantized_path.stat().st_size / 1024 / 1024  # MB
+    print(f"Saved quantized vector database to {quantized_path}")
+    print(f"Quantized index size: {quantized_size:.2f} MB")
+    print(f"Total movies: {quantized_db.ntotal}")
 
 def main(args):
     print("Processing input and output paths...")
@@ -225,16 +271,35 @@ def main(args):
     movie_embeddings = get_embeddings(model, movie_texts)
     print(f"Done: Creating movie embeddings with dimensionality = {movie_embeddings.shape[1]}")
 
-    print("Creating the vector database...")
-    vector_db = init_vector_db(movie_embeddings)
+    # print("Creating the vector database...")
+    # vector_db = init_vector_db(movie_embeddings)
+    
+    print("\nCreating quantized vector database (smaller size)...")
+    quantized_db = init_quantized_vector_db(movie_embeddings, nlist=100, m=16, nbits=8)
 
-    print("Saving results...")
-    save_vector_db(vector_db, output_dir)
+    print("\nSaving results...")
+    # save_vector_db(vector_db, output_dir)
+    save_quantized_vector_db(quantized_db, output_dir)
 
     movies_df.to_csv(output_dir / "movies_df.csv", index=False)
     
+    # Save queries and ID mappings
     with open(output_dir / "queries.json", "w") as f:
         json.dump(dict(movie_queries), f)
+    
+    # Create and save ID mappings to avoid loading queries.json at runtime
+    idx_to_id_mapping = {i: int(movie_id) for i, movie_id in enumerate(movie_ids)}
+    id_to_idx_mapping = {movie_id: idx for idx, movie_id in idx_to_id_mapping.items()}
+    
+    with open(output_dir / "idx_to_id_mapping.json", "w") as f:
+        json.dump(idx_to_id_mapping, f)
+    
+    with open(output_dir / "id_to_idx_mapping.json", "w") as f:
+        json.dump(id_to_idx_mapping, f)
+    
+    print("\n✅ Done! Both normal and quantized indexes created.")
+    print("Use 'movie_vectors_quantized.index' for production deployment.")
+    print(f"Created ID mappings with {len(idx_to_id_mapping)} movies")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
